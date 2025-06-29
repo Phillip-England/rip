@@ -1,4 +1,4 @@
-use rlex::{self, Rlex};
+use rlex::{self, Rlex, DefaultState, DefaultToken};
 
 #[derive(Debug, PartialEq, Eq)]
 enum LexerState {
@@ -18,11 +18,79 @@ pub enum TokenHtml {
     Whitespace { text: String },
 }
 
+fn validate_token_html_backslash_count(tag_str: &str) -> Result<(), String> {
+    let mut r: Rlex<DefaultState, DefaultToken> = Rlex::new(tag_str, DefaultState::Default);
+    let mut count = 0;
+    while !r.at_end() {
+        if r.char() == '/' {
+            if !r.is_in_quote() {
+                count += 1;
+            }
+        }
+        r.next();
+    }
+    if count > 1 {
+        return Err(format!("ERR_HTML_FORMAT: the following tag has more than 1 '/' character outside of quotes: {}", tag_str));
+    }
+    return Ok(());
+}
+
+fn validate_token_html_quotes(tag_str: &str) -> Result<(), String> {
+    let mut r: Rlex<DefaultState, DefaultToken> = Rlex::new(tag_str, DefaultState::Default);
+    let mut collect: Vec<String> = vec![];
+    while !r.at_end() {
+        let start_char = r.char();
+        if start_char == '\'' {
+            let start = r.pos();
+            r.next();
+            r.next_until('\'');
+            let str = r.str_from_rng(start, r.pos());
+            collect.push(str.to_string());
+        }
+        if start_char == '"' {
+            let start = r.pos();
+            r.next();
+            r.next_until('"');
+            let str = r.str_from_rng(start, r.pos());
+            collect.push(str.to_string());
+        }
+        r.next();
+    }
+    let mut src = r.src().to_string();
+    for s in collect {
+        let squeezed = s.replace(" ", "");
+        if squeezed == "\"\"" || squeezed == "''" {
+            return Err(format!("ERR_HTML_FORMAT: the following tag makes poor use of quotes has extract quotes: {}", tag_str));
+        }
+        let mut chars = s.chars();
+        let first_char = match chars.nth(0) {
+            Some(c) => {c},
+            None => {
+                continue;
+            }
+        };
+        let last_char = match chars.last() {
+            Some(c) => {c},
+            None => {
+                continue;
+            }
+        };
+        if first_char != last_char {
+            return Err(format!("ERR_HTML_FORMAT: the following tag makes poor use of quotes and is missing a closing quote: {}", tag_str));
+        }
+
+        src = src.replace(&s, "");
+    }
+    println!("{}", src);
+    if src.contains("'") || src.contains("\"") {
+        return Err(format!("ERR_HTML_FORMAT: the following tag makes poor use of quotes and is malformed: {}", tag_str));
+    }
+    return Ok(());
+}
+
 pub fn new_token_html_from_tag(tag_str: &str) -> Result<TokenHtml, String> {
-
-    // counting the number of // chars
-    
-
+    validate_token_html_backslash_count(tag_str)?;
+    validate_token_html_quotes(tag_str)?;
     let tag_name = html_tag_name(tag_str)?;
     let format_breaking_tag_names = vec!["script".to_owned(), "style".to_owned(), "textarea".to_owned(), "xmp".to_owned(), "pre".to_owned()];     
     let mut is_format_breaking = false;
@@ -264,27 +332,62 @@ fn test_tokenize() {
 }
 
 
+// #[test]
+// fn test_new_token_html_tag() {
+//     assert!(new_token_html_from_tag("<div>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div>".to_string() });
+//     assert!(new_token_html_from_tag("<DIV>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<DIV>".to_string() });
+//     assert!(new_token_html_from_tag("<div class='x'>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div class='x'>".to_string() });
+//     assert!(new_token_html_from_tag("</div>").unwrap() == TokenHtml::Close { tag_name: "div".to_string(), outer_html: "</div>".to_string() });
+//     assert!(new_token_html_from_tag("<br/>").unwrap() == TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br/>".to_string() });
+//     assert!(new_token_html_from_tag("<br />").unwrap() == TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br />".to_string() });
+//     assert!(new_token_html_from_tag("<input type='text'/>").unwrap() == TokenHtml::SelfClosing { tag_name: "input".to_string(), outer_html: "<input type='text'/>".to_string() });
+//     assert!(new_token_html_from_tag("<hr//>").is_err());
+//     assert!(new_token_html_from_tag("<script>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "script".to_string(), outer_html: "<script>".to_string() });
+//     assert!(new_token_html_from_tag("</script>").unwrap() == TokenHtml::PreLikeClose { tag_name: "script".to_string(), outer_html: "</script>".to_string() });
+//     assert!(new_token_html_from_tag("<style>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "style".to_string(), outer_html: "<style>".to_string() });
+//     assert!(new_token_html_from_tag("</style>").unwrap() == TokenHtml::PreLikeClose { tag_name: "style".to_string(), outer_html: "</style>".to_string() });
+//     assert!(new_token_html_from_tag("<pre>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "pre".to_string(), outer_html: "<pre>".to_string() });
+//     assert!(new_token_html_from_tag("</pre>").unwrap() == TokenHtml::PreLikeClose { tag_name: "pre".to_string(), outer_html: "</pre>".to_string() });
+//     assert!(new_token_html_from_tag("<textarea>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "textarea".to_string(), outer_html: "<textarea>".to_string() });
+//     assert!(new_token_html_from_tag("</textarea>").unwrap() == TokenHtml::PreLikeClose { tag_name: "textarea".to_string(), outer_html: "</textarea>".to_string() });
+//     assert!(new_token_html_from_tag("<xmp>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "xmp".to_string(), outer_html: "<xmp>".to_string() });
+//     assert!(new_token_html_from_tag("</xmp>").unwrap() == TokenHtml::PreLikeClose { tag_name: "xmp".to_string(), outer_html: "</xmp>".to_string() });
+// }
+
 #[test]
-fn test_new_token_html_tag() {
-    assert!(new_token_html_from_tag("<div>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div>".to_string() });
-    assert!(new_token_html_from_tag("<DIV>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<DIV>".to_string() });
-    assert!(new_token_html_from_tag("<div class='x'>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div class='x'>".to_string() });
-    assert!(new_token_html_from_tag("</div>").unwrap() == TokenHtml::Close { tag_name: "div".to_string(), outer_html: "</div>".to_string() });
-    assert!(new_token_html_from_tag("<br/>").unwrap() == TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br/>".to_string() });
-    assert!(new_token_html_from_tag("<br />").unwrap() == TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br />".to_string() });
-    assert!(new_token_html_from_tag("<input type='text'/>").unwrap() == TokenHtml::SelfClosing { tag_name: "input".to_string(), outer_html: "<input type='text'/>".to_string() });
-    assert!(new_token_html_from_tag("<hr//>").unwrap() == TokenHtml::SelfClosing { tag_name: "hr".to_string(), outer_html: "<hr//>".to_string() });
-    assert!(new_token_html_from_tag("<script>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "script".to_string(), outer_html: "<script>".to_string() });
-    assert!(new_token_html_from_tag("</script>").unwrap() == TokenHtml::PreLikeClose { tag_name: "script".to_string(), outer_html: "</script>".to_string() });
-    assert!(new_token_html_from_tag("<style>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "style".to_string(), outer_html: "<style>".to_string() });
-    assert!(new_token_html_from_tag("</style>").unwrap() == TokenHtml::PreLikeClose { tag_name: "style".to_string(), outer_html: "</style>".to_string() });
-    assert!(new_token_html_from_tag("<pre>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "pre".to_string(), outer_html: "<pre>".to_string() });
-    assert!(new_token_html_from_tag("</pre>").unwrap() == TokenHtml::PreLikeClose { tag_name: "pre".to_string(), outer_html: "</pre>".to_string() });
-    assert!(new_token_html_from_tag("<textarea>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "textarea".to_string(), outer_html: "<textarea>".to_string() });
-    assert!(new_token_html_from_tag("</textarea>").unwrap() == TokenHtml::PreLikeClose { tag_name: "textarea".to_string(), outer_html: "</textarea>".to_string() });
-    assert!(new_token_html_from_tag("<xmp>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "xmp".to_string(), outer_html: "<xmp>".to_string() });
-    assert!(new_token_html_from_tag("</xmp>").unwrap() == TokenHtml::PreLikeClose { tag_name: "xmp".to_string(), outer_html: "</xmp>".to_string() });
+fn test_validate_token_backslash_count() {
+    assert!(validate_token_html_backslash_count("<h1>").is_ok());
+    assert!(validate_token_html_backslash_count("<h1//>").is_err());
+    assert!(validate_token_html_backslash_count("<////h1//>").is_err());
+    assert!(validate_token_html_backslash_count("<h1 attr='//////////'/>").is_ok());
+
 }
+
+#[test]
+fn test_validate_token_html_quotes_more() {
+    assert!(validate_token_html_quotes(r#"<div data-attr="hello">"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div data-attr='hello'>"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div data-attr="'quoted'">"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div data-attr='"quoted"'>"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div data-attr='"inner"stuff"'>"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div data-attr="'inner'stuff'">"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<input value='"He said, \"Hello\""'/>"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<input value="'She said, 'Hi''"/>"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<img alt='"a "complex" alt"'>"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div data-attr='missing end>"#).is_err());
+    assert!(validate_token_html_quotes(r#"<div data-attr="missing end>"#).is_err());
+    assert!(validate_token_html_quotes(r#"<div class="foo" bar='baz'>"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div class="foo" bar='baz>"#).is_err());
+    assert!(validate_token_html_quotes(r#"<path d='M10 10 H90 V90 H10 Z'/>"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<path d="M10 10 H90 V90 H10 Z"/>"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div class="foo"""""""""""""""""""""""""""""""""">"#).is_err());
+    assert!(validate_token_html_quotes(r#"<div class='foo'''''''''''''''''''''''''''''''>"#).is_err());
+    assert!(validate_token_html_quotes(r#"<div attr='he said \"hi\"'>"#).is_ok()); // no escape semantics in HTML attr
+    assert!(validate_token_html_quotes(r#"<div attr="it\'s fine">"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div attr="''">"#).is_ok());
+    assert!(validate_token_html_quotes(r#"<div attr='""'>"#).is_ok());
+}
+
 
 #[test]
 fn test_html_tag_name() {
