@@ -81,7 +81,6 @@ fn validate_token_html_quotes(tag_str: &str) -> Result<(), String> {
 
         src = src.replace(&s, "");
     }
-    println!("{}", src);
     if src.contains("'") || src.contains("\"") {
         return Err(format!("ERR_HTML_FORMAT: the following tag makes poor use of quotes and is malformed: {}", tag_str));
     }
@@ -166,11 +165,10 @@ fn html_tag_name(tag: &str) -> Result<String, String> {
 
 pub fn tokenize(source: &str) -> Result<Vec<TokenHtml>, String> {
     let mut r: Rlex<LexerState, TokenHtml> = Rlex::new(source, LexerState::InTag);
-    let format_breaking_tag_names = vec!["script".to_owned(), "style".to_owned(), "textarea".to_owned(), "xmp".to_owned(), "pre".to_owned()];      
     while !r.at_end() {
         match r.state() {
             LexerState::InTag => {
-                let toks = handle_in_tag(&mut r, &format_breaking_tag_names)?;
+                let toks = handle_in_tag(&mut r)?;
                 match toks {
                     Some(toks) => {
                         for tok in toks {
@@ -214,7 +212,7 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenHtml>, String> {
     return Ok(toks);
 }
 
-fn handle_in_tag(r: &mut Rlex<LexerState, TokenHtml>, format_breaking_tag_names: &Vec<String>) -> Result<Option<Vec<TokenHtml>>, String> {
+fn handle_in_tag(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<TokenHtml>>, String> {
     let start = r.pos();
     while !r.at_end() {
         r.next_until('>');
@@ -224,20 +222,32 @@ fn handle_in_tag(r: &mut Rlex<LexerState, TokenHtml>, format_breaking_tag_names:
         break;
     }
     let tag_str = r.str_from_rng(start, r.pos()).to_owned();
-    let tag_name = html_tag_name(&tag_str)?;
     // important! stepping off the '>' and into the next section
     r.next();
-    if format_breaking_tag_names.contains(&tag_name) {
-        r.state_set(LexerState::InPreLike);
-        return Ok(Some(vec![TokenHtml::PreLikeOpen { tag_name: tag_name, outer_html: tag_str }]));
+    let tok = new_token_html_from_tag(&tag_str)?;
+    match tok {
+        TokenHtml::Open { tag_name: _, outer_html: _ } => {
+            if r.char() != '<' {
+                r.state_set(LexerState::InText);
+            }
+        },
+        TokenHtml::Close { tag_name: _, outer_html: _ } => {
+            r.state_set(LexerState::InTag);
+        },
+        TokenHtml::PreLikeOpen { tag_name: _, outer_html: _ } => {
+            r.state_set(LexerState::InPreLike);
+        },
+        TokenHtml::PreLikeClose { tag_name: _, outer_html: _ } => {
+            r.state_set(LexerState::InTag);
+        },
+        TokenHtml::SelfClosing { tag_name: _, outer_html: _ } => {
+            r.state_set(LexerState::InTag);
+        },
+        _ => {
+            return Err(format!("ERR_HTML_FORMAT: derived a TokenHtml::WhiteSpace or TokenHtml::InnerText from new_token_html_from_tag, which is not possible"));
+        }
     }
-    // checking if we instantly stepped into another tag, keep the same state
-    if r.char() == '<' {
-        return Ok(Some(vec![TokenHtml::Open { tag_name: tag_name, outer_html: tag_str }]));
-    }
-    // if we didn't hit a '<', we are in a tags text
-    r.state_set(LexerState::InText);
-    return Ok(Some(vec![TokenHtml::Open { tag_name: tag_name, outer_html: tag_str }]));
+    return Ok(Some(vec![tok]));
 }
 
 fn handle_in_text(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<TokenHtml>>, String> {
@@ -270,7 +280,7 @@ fn handle_in_pre_like(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<
         }
     };
     let (tag_name, _outer_html) = match prev_tok {
-        TokenHtml::PreLikeClose { tag_name, outer_html } => ( tag_name, outer_html ),
+        TokenHtml::PreLikeOpen { tag_name, outer_html } => ( tag_name, outer_html ),
         _ => {
             return Err("ERR_HTML_FORMAT: expected the previous token to be prelike".to_string());
         }
@@ -279,7 +289,7 @@ fn handle_in_pre_like(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<
     // we need to search for the next closing tag that matches the prev tag (which is pre-like)
     let text_start = r.pos();
     while !r.at_end() {
-        // keep walking until we find a '<' (it doesn't matter if it is quoted or not)
+        // keep walking until we find a '<'
         // it may close directly after like <script></script>
         if r.char() != '<' {
             r.next_until('<');
@@ -294,13 +304,13 @@ fn handle_in_pre_like(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<
             continue;
         }
         // we found the close tag
-        let prelike_text = r.str_from_rng(text_start, close_tag_start);
-        let close_tok = TokenHtml::Close { tag_name: tag_name_ref.clone(), outer_html: close_tag.to_string() };
+        let prelike_text = r.str_from_rng(text_start, close_tag_start-1);
+        let close_tok = TokenHtml::PreLikeClose { tag_name: tag_name_ref.clone(), outer_html: close_tag.to_string() };
         // if the prelike text only contains spaces, then it needs to be treated like whitespace
         if prelike_text.replace(' ', "").len() == 0 {
             return Ok(Some(vec![TokenHtml::Whitespace { text: prelike_text.to_string() }, close_tok]));
         }
-        return Ok(Some(vec![close_tok]));
+        return Ok(Some(vec![TokenHtml::InnerText { text: prelike_text.to_string() } , close_tok]));
     }
     // we should exit in the loop because we MUST find a closing prelike tag
     return Err("ERR_HTML_FORMAT: failed to find a closing tag for ".to_string());
@@ -310,13 +320,50 @@ fn handle_in_pre_like(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<
 
 #[test]
 fn test_tokenize() {
+    
     // let toks = tokenize("<h1>Hello, World!</h1>").unwrap();
-    // println!("{:?}", toks);
     // assert!(toks == vec![
     //     TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
     //     TokenHtml::InnerText { text : "Hello, World!".to_string() },
     //     TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
     // ]);
+
+    // let toks = tokenize("<h1></h1>").unwrap();
+    // assert!(toks == vec![
+    //     TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
+    //     TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
+    // ]);
+
+    // let toks = tokenize("<h1>    </h1>").unwrap();
+    // assert!(toks == vec![
+    //     TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() },
+    //     TokenHtml::Whitespace { text: "    ".to_string() }, 
+    //     TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
+    // ]);
+
+    // let toks = tokenize("<h1><p>Hello, World!</p></h1>").unwrap();
+    // assert!(toks == vec![
+    //     TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
+    //     TokenHtml::Open { tag_name: "p".to_string(), outer_html: "<p>".to_string() }, 
+    //     TokenHtml::InnerText { text : "Hello, World!".to_string() },
+    //     TokenHtml::Close { tag_name: "p".to_string(), outer_html: "</p>".to_string() },
+    //     TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
+    // ]);
+
+    // let toks = tokenize("<script>console.log('hello, world!')</script>").unwrap();
+    // assert!(toks == vec![
+    //     TokenHtml::PreLikeOpen { tag_name: "script".to_string(), outer_html: "<script>".to_string() }, 
+    //     TokenHtml::InnerText { text: "console.log('hello, world!')".to_string() },
+    //     TokenHtml::PreLikeClose { tag_name: "script".to_string(), outer_html: "</script>".to_string() }, 
+    // ]);
+
+    let toks = tokenize("<script>console.log('</script>')</script>").unwrap();
+    println!("{:?}", toks);
+    assert!(toks == vec![
+        TokenHtml::PreLikeOpen { tag_name: "script".to_string(), outer_html: "<script>".to_string() }, 
+        TokenHtml::InnerText { text: "console.log('</script>')".to_string() },
+        TokenHtml::PreLikeClose { tag_name: "script".to_string(), outer_html: "</script>".to_string() }, 
+    ]);
 
 
     // assert!(tokenize("<h1><p>Hello, World!</p></h1>").unwrap() == vec!["<h1>", "<p>",  "Hello, World!", "</p>", "</h1>"]);
@@ -332,27 +379,27 @@ fn test_tokenize() {
 }
 
 
-// #[test]
-// fn test_new_token_html_tag() {
-//     assert!(new_token_html_from_tag("<div>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div>".to_string() });
-//     assert!(new_token_html_from_tag("<DIV>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<DIV>".to_string() });
-//     assert!(new_token_html_from_tag("<div class='x'>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div class='x'>".to_string() });
-//     assert!(new_token_html_from_tag("</div>").unwrap() == TokenHtml::Close { tag_name: "div".to_string(), outer_html: "</div>".to_string() });
-//     assert!(new_token_html_from_tag("<br/>").unwrap() == TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br/>".to_string() });
-//     assert!(new_token_html_from_tag("<br />").unwrap() == TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br />".to_string() });
-//     assert!(new_token_html_from_tag("<input type='text'/>").unwrap() == TokenHtml::SelfClosing { tag_name: "input".to_string(), outer_html: "<input type='text'/>".to_string() });
-//     assert!(new_token_html_from_tag("<hr//>").is_err());
-//     assert!(new_token_html_from_tag("<script>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "script".to_string(), outer_html: "<script>".to_string() });
-//     assert!(new_token_html_from_tag("</script>").unwrap() == TokenHtml::PreLikeClose { tag_name: "script".to_string(), outer_html: "</script>".to_string() });
-//     assert!(new_token_html_from_tag("<style>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "style".to_string(), outer_html: "<style>".to_string() });
-//     assert!(new_token_html_from_tag("</style>").unwrap() == TokenHtml::PreLikeClose { tag_name: "style".to_string(), outer_html: "</style>".to_string() });
-//     assert!(new_token_html_from_tag("<pre>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "pre".to_string(), outer_html: "<pre>".to_string() });
-//     assert!(new_token_html_from_tag("</pre>").unwrap() == TokenHtml::PreLikeClose { tag_name: "pre".to_string(), outer_html: "</pre>".to_string() });
-//     assert!(new_token_html_from_tag("<textarea>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "textarea".to_string(), outer_html: "<textarea>".to_string() });
-//     assert!(new_token_html_from_tag("</textarea>").unwrap() == TokenHtml::PreLikeClose { tag_name: "textarea".to_string(), outer_html: "</textarea>".to_string() });
-//     assert!(new_token_html_from_tag("<xmp>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "xmp".to_string(), outer_html: "<xmp>".to_string() });
-//     assert!(new_token_html_from_tag("</xmp>").unwrap() == TokenHtml::PreLikeClose { tag_name: "xmp".to_string(), outer_html: "</xmp>".to_string() });
-// }
+#[test]
+fn test_new_token_html_tag() {
+    assert!(new_token_html_from_tag("<div>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div>".to_string() });
+    assert!(new_token_html_from_tag("<DIV>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<DIV>".to_string() });
+    assert!(new_token_html_from_tag("<div class='x'>").unwrap() == TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div class='x'>".to_string() });
+    assert!(new_token_html_from_tag("</div>").unwrap() == TokenHtml::Close { tag_name: "div".to_string(), outer_html: "</div>".to_string() });
+    assert!(new_token_html_from_tag("<br/>").unwrap() == TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br/>".to_string() });
+    assert!(new_token_html_from_tag("<br />").unwrap() == TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br />".to_string() });
+    assert!(new_token_html_from_tag("<input type='text'/>").unwrap() == TokenHtml::SelfClosing { tag_name: "input".to_string(), outer_html: "<input type='text'/>".to_string() });
+    assert!(new_token_html_from_tag("<hr//>").is_err());
+    assert!(new_token_html_from_tag("<script>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "script".to_string(), outer_html: "<script>".to_string() });
+    assert!(new_token_html_from_tag("</script>").unwrap() == TokenHtml::PreLikeClose { tag_name: "script".to_string(), outer_html: "</script>".to_string() });
+    assert!(new_token_html_from_tag("<style>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "style".to_string(), outer_html: "<style>".to_string() });
+    assert!(new_token_html_from_tag("</style>").unwrap() == TokenHtml::PreLikeClose { tag_name: "style".to_string(), outer_html: "</style>".to_string() });
+    assert!(new_token_html_from_tag("<pre>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "pre".to_string(), outer_html: "<pre>".to_string() });
+    assert!(new_token_html_from_tag("</pre>").unwrap() == TokenHtml::PreLikeClose { tag_name: "pre".to_string(), outer_html: "</pre>".to_string() });
+    assert!(new_token_html_from_tag("<textarea>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "textarea".to_string(), outer_html: "<textarea>".to_string() });
+    assert!(new_token_html_from_tag("</textarea>").unwrap() == TokenHtml::PreLikeClose { tag_name: "textarea".to_string(), outer_html: "</textarea>".to_string() });
+    assert!(new_token_html_from_tag("<xmp>").unwrap() == TokenHtml::PreLikeOpen { tag_name: "xmp".to_string(), outer_html: "<xmp>".to_string() });
+    assert!(new_token_html_from_tag("</xmp>").unwrap() == TokenHtml::PreLikeClose { tag_name: "xmp".to_string(), outer_html: "</xmp>".to_string() });
+}
 
 #[test]
 fn test_validate_token_backslash_count() {
