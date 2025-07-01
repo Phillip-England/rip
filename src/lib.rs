@@ -215,11 +215,12 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenHtml>, String> {
 fn handle_in_tag(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<TokenHtml>>, String> {
     let start = r.pos();
     while !r.at_end() {
-        r.next_until('>');
-        if r.is_in_quote() {
-            continue;
+        if r.char() == '>' {
+            if !r.is_in_quote() {
+                break;
+            }
         }
-        break;
+        r.next();
     }
     let tag_str = r.str_from_rng(start, r.pos()).to_owned();
     // important! stepping off the '>' and into the next section
@@ -232,7 +233,7 @@ fn handle_in_tag(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<Token
             }
         },
         TokenHtml::Close { tag_name: _, outer_html: _ } => {
-            r.state_set(LexerState::InTag);
+            r.state_set(LexerState::InText);
         },
         TokenHtml::PreLikeOpen { tag_name: _, outer_html: _ } => {
             r.state_set(LexerState::InPreLike);
@@ -241,7 +242,7 @@ fn handle_in_tag(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<Token
             r.state_set(LexerState::InTag);
         },
         TokenHtml::SelfClosing { tag_name: _, outer_html: _ } => {
-            r.state_set(LexerState::InTag);
+            r.state_set(LexerState::InText);
         },
         _ => {
             return Err(format!("ERR_HTML_FORMAT: derived a TokenHtml::WhiteSpace or TokenHtml::InnerText from new_token_html_from_tag, which is not possible"));
@@ -251,19 +252,14 @@ fn handle_in_tag(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<Token
 }
 
 fn handle_in_text(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<TokenHtml>>, String> {
-    // walking until we hit a '<' (since we are in html text, it doens't matter if it is wrapped in quotes or not)
     let start = r.pos();
     r.next_until('<');
-    // important! stepping off the '<' and into the last char of the html tag text
     r.prev();
-    // if our current char is '>' then we know tags have stacked together like <h1><p> so no need to collect
     r.state_set(LexerState::InTag);
     if r.char() == '>' {
-        // important! stepping back onto the '<' so we are at the start of the next tag
         r.next();
         return Ok(None);
     }
-    // important! stepping back onto the '<' so we are at the start of the next tag
     let tag_text = r.str_from_rng(start, r.pos()).to_owned();
     r.next();
     if tag_text.replace(" ", "").len() == 0 {
@@ -276,37 +272,40 @@ fn handle_in_pre_like(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<
     let prev_tok = match r.token_prev().cloned() {
         Some(tok) => { tok },
         None => {
-            return Err("ERR_HTML_FORMAT: ended up inside of a prelike token without a reference token to peek back on".to_string());
+            return Err("ERR_HTML_FORMAT: ended up inside of a prelike token without a reference token to peek back on {}".to_string());
         }
     };
     let (tag_name, _outer_html) = match prev_tok {
         TokenHtml::PreLikeOpen { tag_name, outer_html } => ( tag_name, outer_html ),
         _ => {
-            return Err("ERR_HTML_FORMAT: expected the previous token to be prelike".to_string());
+            return Err(format!("ERR_HTML_FORMAT: expected the previous token to be prelike {:?}", prev_tok));
         }
     };
     let tag_name_ref = &tag_name;
     // we need to search for the next closing tag that matches the prev tag (which is pre-like)
     let text_start = r.pos();
-    while !r.at_end() {
-        // keep walking until we find a '<'
-        // it may close directly after like <script></script>
-        if r.char() != '<' {
-            r.next_until('<');
+    if r.char() != '<' {
+        while !r.at_end() {
+            if r.char() == '<' {
+                if !r.is_in_quote() {
+                    break;
+                }
+            }
+            r.next();
         }
+    }
+    while !r.at_end() {
         let close_tag_start = r.pos();
         r.next_until('>');
+        r.state_set(LexerState::InTag);
         let close_tag = r.str_from_rng(close_tag_start, r.pos());
         let close_tag_condensed = close_tag.replace(' ', "");
-        // if we dont find the close tag, continue
         if close_tag_condensed != format!("</{}>", tag_name_ref) {
             r.goto_pos(close_tag_start);
             continue;
         }
-        // we found the close tag
         let prelike_text = r.str_from_rng(text_start, close_tag_start-1);
         let close_tok = TokenHtml::PreLikeClose { tag_name: tag_name_ref.clone(), outer_html: close_tag.to_string() };
-        // if the prelike text only contains spaces, then it needs to be treated like whitespace
         if prelike_text.replace(' ', "").len() == 0 {
             return Ok(Some(vec![TokenHtml::Whitespace { text: prelike_text.to_string() }, close_tok]));
         }
@@ -321,52 +320,176 @@ fn handle_in_pre_like(r: &mut Rlex<LexerState, TokenHtml>) -> Result<Option<Vec<
 #[test]
 fn test_tokenize() {
     
-    // let toks = tokenize("<h1>Hello, World!</h1>").unwrap();
-    // assert!(toks == vec![
-    //     TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
-    //     TokenHtml::InnerText { text : "Hello, World!".to_string() },
-    //     TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
-    // ]);
+    let toks = tokenize("<h1>Hello, World!</h1>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
+        TokenHtml::InnerText { text : "Hello, World!".to_string() },
+        TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
+    ]);
 
-    // let toks = tokenize("<h1></h1>").unwrap();
-    // assert!(toks == vec![
-    //     TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
-    //     TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
-    // ]);
+    let toks = tokenize("<h1></h1>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
+        TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
+    ]);
 
-    // let toks = tokenize("<h1>    </h1>").unwrap();
-    // assert!(toks == vec![
-    //     TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() },
-    //     TokenHtml::Whitespace { text: "    ".to_string() }, 
-    //     TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
-    // ]);
+    let toks = tokenize("<h1>    </h1>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() },
+        TokenHtml::Whitespace { text: "    ".to_string() }, 
+        TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
+    ]);
 
-    // let toks = tokenize("<h1><p>Hello, World!</p></h1>").unwrap();
-    // assert!(toks == vec![
-    //     TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
-    //     TokenHtml::Open { tag_name: "p".to_string(), outer_html: "<p>".to_string() }, 
-    //     TokenHtml::InnerText { text : "Hello, World!".to_string() },
-    //     TokenHtml::Close { tag_name: "p".to_string(), outer_html: "</p>".to_string() },
-    //     TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
-    // ]);
+    let toks = tokenize("<h1><p>Hello, World!</p></h1>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
+        TokenHtml::Open { tag_name: "p".to_string(), outer_html: "<p>".to_string() }, 
+        TokenHtml::InnerText { text : "Hello, World!".to_string() },
+        TokenHtml::Close { tag_name: "p".to_string(), outer_html: "</p>".to_string() },
+        TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
+    ]);
 
-    // let toks = tokenize("<script>console.log('hello, world!')</script>").unwrap();
-    // assert!(toks == vec![
-    //     TokenHtml::PreLikeOpen { tag_name: "script".to_string(), outer_html: "<script>".to_string() }, 
-    //     TokenHtml::InnerText { text: "console.log('hello, world!')".to_string() },
-    //     TokenHtml::PreLikeClose { tag_name: "script".to_string(), outer_html: "</script>".to_string() }, 
-    // ]);
+    let toks = tokenize("<script>console.log('hello, world!')</script>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::PreLikeOpen { tag_name: "script".to_string(), outer_html: "<script>".to_string() }, 
+        TokenHtml::InnerText { text: "console.log('hello, world!')".to_string() },
+        TokenHtml::PreLikeClose { tag_name: "script".to_string(), outer_html: "</script>".to_string() }, 
+    ]);
 
     let toks = tokenize("<script>console.log('</script>')</script>").unwrap();
-    println!("{:?}", toks);
     assert!(toks == vec![
         TokenHtml::PreLikeOpen { tag_name: "script".to_string(), outer_html: "<script>".to_string() }, 
         TokenHtml::InnerText { text: "console.log('</script>')".to_string() },
         TokenHtml::PreLikeClose { tag_name: "script".to_string(), outer_html: "</script>".to_string() }, 
     ]);
 
+    let toks = tokenize("<h1><p>Hello, World!</p>     </h1>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
+        TokenHtml::Open { tag_name: "p".to_string(), outer_html: "<p>".to_string() }, 
+        TokenHtml::InnerText { text : "Hello, World!".to_string() },
+        TokenHtml::Close { tag_name: "p".to_string(), outer_html: "</p>".to_string() },
+        TokenHtml::Whitespace { text: "     ".to_string() },
+        TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
+    ]);
 
-    // assert!(tokenize("<h1><p>Hello, World!</p></h1>").unwrap() == vec!["<h1>", "<p>",  "Hello, World!", "</p>", "</h1>"]);
+    let toks = tokenize("<h1>     <p>Hello, World!</p>     </h1>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "h1".to_string(), outer_html: "<h1>".to_string() }, 
+        TokenHtml::Whitespace { text: "     ".to_string() },
+        TokenHtml::Open { tag_name: "p".to_string(), outer_html: "<p>".to_string() }, 
+        TokenHtml::InnerText { text : "Hello, World!".to_string() },
+        TokenHtml::Close { tag_name: "p".to_string(), outer_html: "</p>".to_string() },
+        TokenHtml::Whitespace { text: "     ".to_string() },
+        TokenHtml::Close { tag_name: "h1".to_string(), outer_html: "</h1>".to_string() },
+    ]);
+
+    let toks = tokenize("<div><span>Text</span></div>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div>".to_string() },
+        TokenHtml::Open { tag_name: "span".to_string(), outer_html: "<span>".to_string() },
+        TokenHtml::InnerText { text: "Text".to_string() },
+        TokenHtml::Close { tag_name: "span".to_string(), outer_html: "</span>".to_string() },
+        TokenHtml::Close { tag_name: "div".to_string(), outer_html: "</div>".to_string() },
+    ]);
+
+    let toks = tokenize("<div>  <span>Text</span>  </div>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div>".to_string() },
+        TokenHtml::Whitespace { text: "  ".to_string() },
+        TokenHtml::Open { tag_name: "span".to_string(), outer_html: "<span>".to_string() },
+        TokenHtml::InnerText { text: "Text".to_string() },
+        TokenHtml::Close { tag_name: "span".to_string(), outer_html: "</span>".to_string() },
+        TokenHtml::Whitespace { text: "  ".to_string() },
+        TokenHtml::Close { tag_name: "div".to_string(), outer_html: "</div>".to_string() },
+    ]);
+
+    let toks = tokenize("<ul><li>Item 1</li><li>Item 2</li></ul>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "ul".to_string(), outer_html: "<ul>".to_string() },
+        TokenHtml::Open { tag_name: "li".to_string(), outer_html: "<li>".to_string() },
+        TokenHtml::InnerText { text: "Item 1".to_string() },
+        TokenHtml::Close { tag_name: "li".to_string(), outer_html: "</li>".to_string() },
+        TokenHtml::Open { tag_name: "li".to_string(), outer_html: "<li>".to_string() },
+        TokenHtml::InnerText { text: "Item 2".to_string() },
+        TokenHtml::Close { tag_name: "li".to_string(), outer_html: "</li>".to_string() },
+        TokenHtml::Close { tag_name: "ul".to_string(), outer_html: "</ul>".to_string() },
+    ]);
+
+    let toks = tokenize("<a href='#'>Link</a>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "a".to_string(), outer_html: "<a href='#'>".to_string() },
+        TokenHtml::InnerText { text: "Link".to_string() },
+        TokenHtml::Close { tag_name: "a".to_string(), outer_html: "</a>".to_string() },
+    ]);
+
+    let toks = tokenize("<input type='text'/>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::SelfClosing { tag_name: "input".to_string(), outer_html: "<input type='text'/>".to_string() },
+    ]);
+
+    let toks = tokenize("<br/>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br/>".to_string() },
+    ]);
+
+    let toks = tokenize("<p>Hello<br/>World</p>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "p".to_string(), outer_html: "<p>".to_string() },
+        TokenHtml::InnerText { text: "Hello".to_string() },
+        TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br/>".to_string() },
+        TokenHtml::InnerText { text: "World".to_string() },
+        TokenHtml::Close { tag_name: "p".to_string(), outer_html: "</p>".to_string() },
+    ]);
+
+    let toks = tokenize("<section><h2>Title</h2><p>Body</p></section>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "section".to_string(), outer_html: "<section>".to_string() },
+        TokenHtml::Open { tag_name: "h2".to_string(), outer_html: "<h2>".to_string() },
+        TokenHtml::InnerText { text: "Title".to_string() },
+        TokenHtml::Close { tag_name: "h2".to_string(), outer_html: "</h2>".to_string() },
+        TokenHtml::Open { tag_name: "p".to_string(), outer_html: "<p>".to_string() },
+        TokenHtml::InnerText { text: "Body".to_string() },
+        TokenHtml::Close { tag_name: "p".to_string(), outer_html: "</p>".to_string() },
+        TokenHtml::Close { tag_name: "section".to_string(), outer_html: "</section>".to_string() },
+    ]);
+
+    let toks = tokenize("<p>  Hello   <b>world</b>  </p>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "p".to_string(), outer_html: "<p>".to_string() },
+        TokenHtml::Whitespace { text: "  ".to_string() },
+        TokenHtml::InnerText { text: "  Hello   ".to_string() },
+        TokenHtml::Whitespace { text: "   ".to_string() },
+        TokenHtml::Open { tag_name: "b".to_string(), outer_html: "<b>".to_string() },
+        TokenHtml::InnerText { text: "world".to_string() },
+        TokenHtml::Close { tag_name: "b".to_string(), outer_html: "</b>".to_string() },
+        TokenHtml::Whitespace { text: "  ".to_string() },
+        TokenHtml::Close { tag_name: "p".to_string(), outer_html: "</p>".to_string() },
+    ]);
+
+    let toks = tokenize("<style>h1 { color: red; }</style>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::PreLikeOpen { tag_name: "style".to_string(), outer_html: "<style>".to_string() },
+        TokenHtml::InnerText { text: "h1 { color: red; }".to_string() },
+        TokenHtml::PreLikeClose { tag_name: "style".to_string(), outer_html: "</style>".to_string() },
+    ]);
+
+    let toks = tokenize("<textarea>  <h1>not parsed</h1>  </textarea>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::PreLikeOpen { tag_name: "textarea".to_string(), outer_html: "<textarea>".to_string() },
+        TokenHtml::InnerText { text: "  <h1>not parsed</h1>  ".to_string() },
+        TokenHtml::PreLikeClose { tag_name: "textarea".to_string(), outer_html: "</textarea>".to_string() },
+    ]);
+
+    let toks = tokenize("<div><br/></div>").unwrap();
+    assert!(toks == vec![
+        TokenHtml::Open { tag_name: "div".to_string(), outer_html: "<div>".to_string() },
+        TokenHtml::SelfClosing { tag_name: "br".to_string(), outer_html: "<br/>".to_string() },
+        TokenHtml::Close { tag_name: "div".to_string(), outer_html: "</div>".to_string() },
+    ]);
+
+
+
     // assert!(tokenize("<h1><p>Hello, World!</p>    </h1>").unwrap() == vec!["<h1>", "<p>",  "Hello, World!", "</p>", "    ", "</h1>"]);
     // assert!(tokenize("<div><span>Text</span></div>").unwrap() == vec!["<div>", "<span>", "Text", "</span>", "</div>"]);
     // assert!(tokenize("<div>  <span>Text</span>  </div>").unwrap() == vec!["<div>", "  ", "<span>", "Text", "</span>", "  ", "</div>"]);
