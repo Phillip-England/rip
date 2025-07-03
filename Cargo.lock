@@ -11,6 +11,6 @@ dependencies = [
 
 [[package]]
 name = "rlex"
-version = "0.1.13"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca81f4f07fc514083eb04f44ebeade0119d33186e905a383f5020cb5eb96922c"
+checksum = "865ae9bff7874d6b45781c395ba1b1cf15a533c5b64a026f4654b5a4ead78440"
