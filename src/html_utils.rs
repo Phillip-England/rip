@@ -42,10 +42,20 @@ pub fn validate_token_html_quotes(tag_str: &str) -> Result<(), String> {
         r.next();
     }
     if collect.contains(&"''".to_string()) || collect.contains(&"\"\"".to_string()) {
-        // it needs to be able to contain atleast 1 '' or "" for attr='' empty ones
-        return Err(format!("ERR_HTML_FORMAT: quotation mark error -> {}", tag_str));
+        let mut single_count = 0;
+        let mut double_count = 0;
+        for s in &collect {
+            if s == "''" {
+                single_count+=1;
+            }
+            if s == "\"\"" {
+                double_count+=1;
+            }
+        }
+        if double_count > 1 || single_count > 1 {
+            return Err(format!("ERR_HTML_FORMAT: quotation mark error -> {}", tag_str));
+        }
     }
-    println!("{:?}", collect);
     let mut src = r.src().to_string();
     for s in collect {
         // let squeezed = s.replace(" ", "");

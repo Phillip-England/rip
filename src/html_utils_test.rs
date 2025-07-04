@@ -28,7 +28,6 @@ fn test_validate_token_backslash_count() {
     assert!(validate_token_html_backslash_count("<h1//>").is_err());
     assert!(validate_token_html_backslash_count("<////h1//>").is_err());
     assert!(validate_token_html_backslash_count("<h1 attr='//////////'/>").is_ok());
-
 }
 
 #[test]
